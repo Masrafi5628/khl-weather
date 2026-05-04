@@ -1,9 +1,9 @@
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import * as XLSX from "xlsx";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, ReferenceLine, Area, AreaChart, ComposedChart,
-  Line, LineChart,
+  Line, LineChart, Scatter, ScatterChart, Cell,
 } from "recharts";
 
 const KHULNA_LAT = 22.8098;
@@ -186,15 +186,7 @@ function groupByYear(rows) {
 }
 
 // ─── UI HELPERS ───────────────────────────────────────────────────────────────
-const CT = ({ active, payload, label }) => {
-  if (!active||!payload?.length) return null;
-  return (
-    <div style={{background:"rgba(4,8,15,0.98)",border:"1px solid #1e3a50",borderRadius:10,padding:"10px 15px",fontSize:12,color:"#e0f4ff"}}>
-      <div style={{fontWeight:700,color:"#7dd3fc",marginBottom:5}}>{label}</div>
-      {payload.map((p,i)=><div key={i} style={{color:p.color,marginBottom:2}}>{p.name}: <b>{p.value!=null?p.value:"—"}{p.unit||""}</b></div>)}
-    </div>
-  );
-};
+// Note: CT tooltip is defined inside main component to access theme tokens (th)
 const iStyle={background:"rgba(255,255,255,0.06)",border:"1px solid #1e4d6b",borderRadius:8,color:"#e0f4ff",padding:"7px 11px",fontSize:12,fontFamily:"Georgia,serif",outline:"none",colorScheme:"dark"};
 const box={background:"rgba(255,255,255,0.025)",border:"1px solid #102d4a",borderRadius:16,padding:"18px 14px 14px",marginBottom:16};
 const iv=n=>Math.max(0,Math.floor(n/14)-1);
@@ -249,6 +241,179 @@ const PRESET_RANGES = [
   { label:"2019–2025 (6 yrs)", start:"2019-01-01", endFn: t => t },
 ];
 
+// ─── FIGURE DOWNLOAD UTILITY ─────────────────────────────────────────────────
+
+// Find the best Recharts SVG inside a container.
+// Uses multiple strategies so it works regardless of Recharts version / iframe.
+function findChartSvg(container) {
+  if (!container) return null;
+
+  // Strategy 1: Recharts v2 standard class
+  const byClass = container.querySelector('.recharts-surface')
+                || container.querySelector('.recharts-wrapper svg');
+  if (byClass) {
+    const r = byClass.getBoundingClientRect();
+    if (r.width > 50 && r.height > 50) return byClass;
+    // Class found but zero-size — check SVG attributes
+    const w = parseFloat(byClass.getAttribute('width') || '0');
+    const h = parseFloat(byClass.getAttribute('height') || '0');
+    if (w > 50 && h > 50) return byClass;
+  }
+
+  // Strategy 2: pick the SVG with the largest explicit width attribute
+  const allSvgs = [...container.querySelectorAll('svg')];
+  if (!allSvgs.length) return null;
+
+  let best = null, bestW = 0;
+  for (const svg of allSvgs) {
+    // Check both rendered size and SVG attribute width
+    const rect = svg.getBoundingClientRect();
+    const attrW = parseFloat(svg.getAttribute('width') || '0');
+    const w = Math.max(rect.width, attrW);
+    if (w > bestW) { bestW = w; best = svg; }
+  }
+  return (bestW > 50) ? best : null;
+}
+
+// Retry finding the chart SVG up to maxAttempts times with delay between tries.
+// This handles the ResponsiveContainer two-pass render without using RAF
+// (which gets throttled in iframes).
+async function findChartSvgWithRetry(containerRef, maxAttempts = 25, delayMs = 200) {
+  for (let i = 0; i < maxAttempts; i++) {
+    const svg = findChartSvg(containerRef.current);
+    if (svg) {
+      // Verify it has real dimensions
+      const rect  = svg.getBoundingClientRect();
+      const attrW = parseFloat(svg.getAttribute('width') || '0');
+      const w     = Math.max(rect.width, attrW);
+      const attrH = parseFloat(svg.getAttribute('height') || '0');
+      const h     = Math.max(rect.height, attrH);
+      if (w >= 100 && h >= 50) return { svg, w, h };
+    }
+    await new Promise(r => setTimeout(r, delayMs));
+  }
+  throw new Error(`Chart not ready after ${maxAttempts} attempts — try the individual Download Figure button instead`);
+}
+
+async function renderFigToPng(containerRef, figLabel) {
+  if (!containerRef.current) throw new Error('Chart container not found — make sure you are on the correct tab');
+
+  const { svg: svgEl, w: W, h: H } = await findChartSvgWithRetry(containerRef, 25, 200);
+  const SCALE = 3; // 3× → ~300 dpi
+
+  const clone = svgEl.cloneNode(true);
+  clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+  clone.setAttribute('width',  W);
+  clone.setAttribute('height', H);
+  const style = document.createElementNS('http://www.w3.org/2000/svg', 'style');
+  style.textContent = `text, tspan { font-family: Georgia, serif; } .recharts-text { font-size: 11px; }`;
+  clone.insertBefore(style, clone.firstChild);
+
+  const svgStr  = new XMLSerializer().serializeToString(clone);
+  const svgBlob = new Blob([svgStr], { type: 'image/svg+xml;charset=utf-8' });
+  const svgUrl  = URL.createObjectURL(svgBlob);
+
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width  = Math.round(W * SCALE);
+      canvas.height = Math.round(H * SCALE);
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.scale(SCALE, SCALE);
+      ctx.drawImage(img, 0, 0, W, H);
+      ctx.font = 'bold 9px Georgia, serif';
+      ctx.fillStyle = '#777777';
+      ctx.fillText(`Khulna Heat Stress Study · ${figLabel}`, 8, H - 6);
+      URL.revokeObjectURL(svgUrl);
+      canvas.toBlob(b => b ? resolve(b) : reject(new Error('Canvas export failed')), 'image/png', 1.0);
+    };
+    img.onerror = () => { URL.revokeObjectURL(svgUrl); reject(new Error('SVG image load failed')); };
+    img.src = svgUrl;
+  });
+}
+
+
+// ─── SINGLE FIGURE DOWNLOAD (Save As dialog) ──────────────────────────────────
+async function downloadFig(containerRef, filename, figLabel) {
+  const pngBlob = await renderFigToPng(containerRef, figLabel);
+
+  if (typeof window.showSaveFilePicker === 'function') {
+    try {
+      const fh = await window.showSaveFilePicker({
+        suggestedName: filename,
+        types: [{ description: 'PNG Image (300 dpi)', accept: { 'image/png': ['.png'] } }],
+      });
+      const w = await fh.createWritable();
+      await w.write(pngBlob);
+      await w.close();
+      return;
+    } catch (err) {
+      if (err.name === 'AbortError') return;
+    }
+  }
+  // Fallback
+  const url  = URL.createObjectURL(pngBlob);
+  const link = document.createElement('a');
+  link.href = url; link.download = filename;
+  document.body.appendChild(link); link.click(); document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+// ─── ALL FIGURES DOWNLOAD (folder picker or sequential) ───────────────────────
+
+
+// ─── DOWNLOAD BUTTON COMPONENT ────────────────────────────────────────────────
+function DownloadBtn({ containerRef, filename, figLabel, figNum }) {
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+
+  const handle = async () => {
+    setBusy(true);
+    try {
+      await downloadFig(containerRef, filename, figLabel);
+      setDone(true);
+      setTimeout(() => setDone(false), 2500);
+    } catch(e) {
+      alert('Download failed: ' + e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between',
+                  marginBottom:10, padding:'8px 12px', borderRadius:8,
+                  background:'rgba(56,189,248,0.06)', border:'1px solid #0c4a6e' }}>
+      <div>
+        <span style={{ fontSize:11, color:'#7dd3fc', fontWeight:700 }}>
+          {figNum}
+        </span>
+        <span style={{ fontSize:11, color:'#64a7c8', marginLeft:8 }}>
+          {figLabel}
+        </span>
+        <span style={{ fontSize:10, color:'#4a6a7a', marginLeft:8 }}>
+          · PNG 3× resolution (300 dpi) · white background · print-ready
+        </span>
+      </div>
+      <button
+        onClick={handle}
+        disabled={busy}
+        style={{ display:'flex', alignItems:'center', gap:6, padding:'6px 14px',
+                 borderRadius:7, border:'1px solid #38bdf8',
+                 background: done ? '#064e3b' : '#0c3a5e',
+                 color: done ? '#34d399' : '#7dd3fc',
+                 cursor: busy ? 'wait' : 'pointer',
+                 fontSize:11, fontFamily:'inherit', fontWeight:600,
+                 whiteSpace:'nowrap', transition:'all 0.2s' }}>
+        {busy ? '⏳ Exporting…' : done ? '✓ Saved!' : '📥 Download Figure'}
+      </button>
+    </div>
+  );
+}
+
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
 export default function KhulnaHeatStress() {
   const todayStr    = new Date().toISOString().split("T")[0];
@@ -273,6 +438,192 @@ export default function KhulnaHeatStress() {
   const [downloading, setDownloading] = useState(false);
   const [tab,         setTab]         = useState("mk");
   const [view,        setView]        = useState("monthly");
+
+  // ── Figure refs for paper export ──
+  const refFig2 = useRef(null);
+  const refFig3 = useRef(null);
+  const refFig4 = useRef(null);
+  const refFig5 = useRef(null);
+  const refFig6 = useRef(null);
+  const refFig7 = useRef(null);
+  const refFig8 = useRef(null);
+
+  // ── Paper mode — light theme for journal-quality export ──
+  const [paperMode,    setPaperMode]    = useState(false);
+  const [dlAll,        setDlAll]        = useState({ busy:false, current:0, total:0, filename:'' });
+
+  // Convenience: box style that adapts to paper mode
+  const pbox = { ...box,
+    background: paperMode ? '#f9fafb' : 'rgba(255,255,255,0.025)',
+    border: paperMode ? '1px solid #e5e7eb' : '1px solid #102d4a',
+  };
+
+  // Theme tokens — dark (app) vs white (paper/print)
+  const th = paperMode ? {
+    bg:        '#ffffff',
+    grid:      '#e5e7eb',
+    gridDash:  '3 3',
+    axTick:    '#374151',
+    text:      '#111827',
+    subtext:   '#6b7280',
+    barWbgt:   '#c2410c',
+    barTw:     '#0369a1',
+    lineWbgt:  '#c2410c',
+    lineTw:    '#0369a1',
+    lineTemp:  '#ca8a04',
+    areaWbgt:  '#c2410c',
+    areaFill:  '#fde8d8',
+    refExtreme:'#b91c1c',
+    refDanger: '#c2410c',
+    refCaution:'#a16207',
+    refLethal: '#b91c1c',
+    caution:   '#fbbf24',
+    danger:    '#f97316',
+    extreme:   '#ef4444',
+    boxBg:     '#f9fafb',
+    boxBorder: '#e5e7eb',
+    ttBg:      'rgba(255,255,255,0.98)',
+    ttBorder:  '#d1d5db',
+    ttText:    '#111827',
+    ttLabel:   '#1d4ed8',
+  } : {
+    bg:        'transparent',
+    grid:      '#0a1a28',
+    gridDash:  '3 3',
+    axTick:    '#4a8aaa',
+    text:      '#e0f4ff',
+    subtext:   '#94a3b8',
+    barWbgt:   '#f97316',
+    barTw:     '#38bdf8',
+    lineWbgt:  '#f97316',
+    lineTw:    '#38bdf8',
+    lineTemp:  '#facc15',
+    areaWbgt:  '#f97316',
+    areaFill:  '#f9731622',
+    refExtreme:'#ef4444',
+    refDanger: '#f97316',
+    refCaution:'#facc15',
+    refLethal: '#ef4444',
+    caution:   '#facc15',
+    danger:    '#f97316',
+    extreme:   '#ef4444',
+    boxBg:     'rgba(255,255,255,0.025)',
+    boxBorder: '#102d4a',
+    ttBg:      'rgba(4,8,15,0.98)',
+    ttBorder:  '#1e3a50',
+    ttText:    '#e0f4ff',
+    ttLabel:   '#7dd3fc',
+  };
+
+  // Theme-aware tooltip — defined after th so it can reference th tokens
+  const CT = ({ active, payload, label }) => {
+    if (!active||!payload?.length) return null;
+    return (
+      <div style={{background:th.ttBg,border:`1px solid ${th.ttBorder}`,borderRadius:10,padding:"10px 15px",fontSize:12,color:th.ttText}}>
+        <div style={{fontWeight:700,color:th.ttLabel,marginBottom:5}}>{label}</div>
+        {payload.map((p,i)=><div key={i} style={{color:p.color,marginBottom:2}}>{p.name}: <b>{p.value!=null?p.value:"—"}{p.unit||""}</b></div>)}
+      </div>
+    );
+  };
+
+  // ─── FIGURE LIST — tab field tells the downloader which tab to activate ──────
+  const figList = [
+    { ref:refFig2, filename:'Fig2_Annual_Trend_Lines.png',   label:'Annual Tw, WBGT & Air Temp trend lines', num:'Fig. 2', tab:'trend',      view:null      },
+    { ref:refFig3, filename:'Fig3_Annual_Danger_Days.png',   label:'Annual stacked heat stress risk days',   num:'Fig. 3', tab:'trend',      view:null      },
+    { ref:refFig4, filename:'Fig4_Seasonal_WBGT.png',        label:'Seasonal WBGT comparison bar chart',     num:'Fig. 4', tab:'seasonal',   view:null      },
+    { ref:refFig5, filename:'Fig5_Exceedance_Frequency.png', label:'Exceedance frequency bar chart',         num:'Fig. 5', tab:'exceedance', view:null      },
+    { ref:refFig6, filename:'Fig6_OLS_Regression.png',       label:'OLS regression actual vs trend line',    num:'Fig. 6', tab:'regression', view:null      },
+    { ref:refFig7, filename:'Fig7_Monthly_WBGT_Risk.png',    label:'Monthly WBGT heat stroke risk',          num:'Fig. 7', tab:'heatstroke', view:'monthly' },
+    { ref:refFig8, filename:'Fig8_Wet_Bulb_Temperature.png', label:'Wet bulb temperature time series',       num:'Fig. 8', tab:'wetbulb',    view:'monthly' },
+  ];
+
+  // ─── DOWNLOAD ALL — navigates tabs automatically so every chart is mounted ───
+  const handleDownloadAll = async () => {
+    if (!paperMode) {
+      alert('Please enable 📄 Paper Mode first — the button turns green in the header.');
+      return;
+    }
+
+    // ── Step 1: pick folder BEFORE navigating tabs ──────────────────────────
+    let dirHandle = null;
+    if (typeof window.showDirectoryPicker === 'function') {
+      try {
+        dirHandle = await window.showDirectoryPicker({ mode:'readwrite', startIn:'downloads' });
+      } catch (err) {
+        if (err.name === 'AbortError') return; // user cancelled — do nothing
+        // API exists but failed for another reason — fall through to sequential
+      }
+    }
+
+    // ── Step 2: save current tab/view so we can restore them after ──────────
+    const savedTab  = tab;
+    const savedView = view;
+
+    setDlAll({ busy:true, current:0, total:figList.length, filename:'Preparing…' });
+
+    try {
+      let lastTab = null;
+
+      for (let i = 0; i < figList.length; i++) {
+        const fig = figList[i];
+        setDlAll({ busy:true, current:i+1, total:figList.length, filename:fig.filename });
+
+        // ── Navigate to the right tab + view if not already there ────────────
+        if (fig.tab !== lastTab) {
+          setTab(fig.tab);
+          if (fig.view) setView(fig.view);
+          lastTab = fig.tab;
+          // Wait for React to mount the tab, then poll until chart is ready
+          await new Promise(r => setTimeout(r, 150));
+          await findChartSvgWithRetry(fig.ref, 25, 200);
+          // One extra wait for legend/axes to finish rendering
+          await new Promise(r => setTimeout(r, 100));
+        } else {
+          // Same tab — chart already mounted, brief pause
+          await new Promise(r => setTimeout(r, 100));
+        }
+
+        // ── Capture the chart ────────────────────────────────────────────────
+        let blob;
+        try {
+          blob = await renderFigToPng(fig.ref, fig.label);
+        } catch (e) {
+          console.warn(`Could not capture ${fig.filename}:`, e.message);
+          continue; // skip this figure, keep going
+        }
+
+        // ── Save the blob ────────────────────────────────────────────────────
+        if (dirHandle) {
+          // Write directly into the chosen folder
+          const fh = await dirHandle.getFileHandle(fig.filename, { create:true });
+          const w  = await fh.createWritable();
+          await w.write(blob);
+          await w.close();
+        } else {
+          // Fallback: trigger individual browser download
+          const url  = URL.createObjectURL(blob);
+          const link = document.createElement('a');
+          link.href = url; link.download = fig.filename;
+          document.body.appendChild(link); link.click();
+          document.body.removeChild(link);
+          URL.revokeObjectURL(url);
+          await new Promise(r => setTimeout(r, 700)); // space out browser downloads
+        }
+      }
+
+      // ── Step 3: restore original tab/view ───────────────────────────────
+      setTab(savedTab);
+      setView(savedView);
+      setDlAll({ busy:false, current:figList.length, total:figList.length, filename:'✓ All figures saved!' });
+      setTimeout(() => setDlAll({ busy:false, current:0, total:0, filename:'' }), 3000);
+
+    } catch (e) {
+      alert('Download failed: ' + e.message);
+      setTab(savedTab);
+      setView(savedView);
+      setDlAll({ busy:false, current:0, total:0, filename:'' });
+    }
+  };
 
   // ─── FETCH — re-runs whenever fetchStart or fetchEnd changes ───────────────
   const doFetch = useCallback(async (start, end) => {
@@ -436,8 +787,6 @@ export default function KhulnaHeatStress() {
   // ── SUMMARY STATS ──
   const allTw    = filteredRows.map(r=>r.wetBulb).filter(Boolean);
   const allWbgt  = filteredRows.map(r=>r.wbgt).filter(Boolean);
-  const allTemps = filteredRows.map(r=>r.meanTemp).filter(Boolean);
-  const allHum   = filteredRows.map(r=>r.humidity).filter(Boolean);
   const dangerDays  = filteredRows.filter(r=>r.wbgt>=32&&r.wbgt<35).length;
   const extremeDays = filteredRows.filter(r=>r.wbgt>=35).length;
   const cautionDays = filteredRows.filter(r=>r.wbgt>=28&&r.wbgt<32).length;
@@ -507,9 +856,25 @@ export default function KhulnaHeatStress() {
             <h1 style={{margin:0,fontSize:22,fontWeight:700,color:"#fff"}}>🌡️ Khulna Heat Stroke Risk Index</h1>
             <div style={{fontSize:11,color:"#64a7c8",marginTop:1}}>Wet Bulb · WBGT · Mann-Kendall · Sen's Slope · Pearson r · OLS · Seasonal · Exceedance</div>
           </div>
-          <button onClick={downloadExcel} disabled={downloading||!filteredRows.length} style={{display:"flex",alignItems:"center",gap:7,padding:"9px 16px",borderRadius:10,border:"1px solid #ef4444",background:"linear-gradient(135deg,#3b0000,#5c0a0a)",color:"#fca5a5",cursor:"pointer",fontSize:12,fontFamily:"inherit",fontWeight:600,opacity:!filteredRows.length?0.5:1}}>
-            📥 {downloading?"Exporting…":`Download Excel (${filteredRows.length.toLocaleString()} days)`}
-          </button>
+          <div style={{display:'flex', gap:8, flexWrap:'wrap', alignItems:'center'}}>
+            <button onClick={()=>setPaperMode(p=>!p)} style={{
+              display:"flex", alignItems:"center", gap:7, padding:"9px 16px", borderRadius:10,
+              border:`1px solid ${paperMode?'#16a34a':'#38bdf8'}`,
+              background: paperMode ? 'linear-gradient(135deg,#052e16,#14532d)' : 'rgba(255,255,255,0.05)',
+              color: paperMode ? '#4ade80' : '#7dd3fc',
+              cursor:"pointer", fontSize:12, fontFamily:"inherit", fontWeight:600,
+            }}>
+              {paperMode ? '🟢 Paper Mode ON — click charts then download' : '📄 Paper Mode (white theme for export)'}
+            </button>
+            <button onClick={downloadExcel} disabled={downloading||!filteredRows.length} style={{
+              display:"flex", alignItems:"center", gap:7, padding:"9px 16px", borderRadius:10,
+              border:"1px solid #ef4444", background:"linear-gradient(135deg,#3b0000,#5c0a0a)",
+              color:"#fca5a5", cursor:"pointer", fontSize:12, fontFamily:"inherit", fontWeight:600,
+              opacity:!filteredRows.length?0.5:1
+            }}>
+              📥 {downloading?"Exporting…":`Download Excel (${filteredRows.length.toLocaleString()} days)`}
+            </button>
+          </div>
         </div>
       </div>
 
@@ -661,6 +1026,106 @@ export default function KhulnaHeatStress() {
             ))}
           </div>
 
+          {/* FIGURES DOWNLOAD PANEL */}
+          <div style={{...box, background:'rgba(56,189,248,0.04)', border:'1px solid #0c4a6e', marginBottom:14}}>
+            <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', flexWrap:'wrap', gap:10, marginBottom:12}}>
+              <div style={{fontSize:9, color:'#38bdf8', letterSpacing:3, textTransform:'uppercase'}}>
+                📄 Download Figures for Paper — PNG 300 dpi · White Background · Print-Ready
+              </div>
+
+              {/* ── DOWNLOAD ALL BUTTON ── */}
+              <button
+                onClick={handleDownloadAll}
+                disabled={dlAll.busy}
+                style={{
+                  display:'flex', alignItems:'center', gap:8, padding:'10px 20px',
+                  borderRadius:10, cursor: dlAll.busy ? 'wait' : 'pointer',
+                  border: dlAll.busy ? '1px solid #4ade80' : '2px solid #38bdf8',
+                  background: dlAll.busy
+                    ? 'linear-gradient(135deg,#052e16,#14532d)'
+                    : 'linear-gradient(135deg,#0c3a5e,#1e4d6b)',
+                  color: dlAll.busy ? '#4ade80' : '#7dd3fc',
+                  fontSize:13, fontFamily:'inherit', fontWeight:700,
+                  boxShadow: dlAll.busy ? '0 0 16px rgba(74,222,128,0.3)' : '0 0 16px rgba(56,189,248,0.2)',
+                  transition:'all 0.2s',
+                }}>
+                {dlAll.busy ? (
+                  <>
+                    <span style={{fontSize:16}}>⏳</span>
+                    <span>
+                      Saving {dlAll.current}/{dlAll.total}…
+                      <span style={{fontSize:10, fontWeight:400, display:'block', color:'#86efac'}}>
+                        {dlAll.filename}
+                      </span>
+                    </span>
+                    {/* progress bar */}
+                    <div style={{
+                      position:'absolute', bottom:0, left:0,
+                      height:3, borderRadius:2, background:'#4ade80',
+                      width:`${(dlAll.current/dlAll.total)*100}%`,
+                      transition:'width 0.3s',
+                    }}/>
+                  </>
+                ) : (
+                  <>📁 Download All Figures to Folder</>
+                )}
+              </button>
+            </div>
+
+            {/* Instruction row */}
+            <div style={{fontSize:11, color:'#4a8aaa', marginBottom:10, lineHeight:1.7}}>
+              <b style={{color:'#7dd3fc'}}>How to use:</b> Enable 📄 Paper Mode → visit each tab so charts render → click
+              <b style={{color:'#38bdf8'}}> Download All Figures to Folder</b> to pick a folder and save all 7 figures at once.
+              Or download individually below.
+              <span style={{color:'#facc15', marginLeft:6}}>
+                ⚠ Fig 1 (Study Area Map) must be created separately in QGIS or Google Maps.
+              </span>
+            </div>
+
+            {/* ── TAB NAVIGATION GUIDE ── */}
+            <div style={{display:'flex', gap:6, flexWrap:'wrap', marginBottom:12}}>
+              {[
+                {tab:'trend',      figs:'Fig 2 & 3'},
+                {tab:'seasonal',   figs:'Fig 4'},
+                {tab:'exceedance', figs:'Fig 5'},
+                {tab:'regression', figs:'Fig 6'},
+                {tab:'heatstroke', figs:'Fig 7'},
+                {tab:'wetbulb',    figs:'Fig 8'},
+              ].map(({tab:t,figs})=>(
+                <button key={t} onClick={()=>setTab(t)} style={{
+                  padding:'4px 10px', borderRadius:6, fontSize:10, fontFamily:'inherit',
+                  border:'1px solid #1e4d6b', background: tab===t?'#0c3a5e':'transparent',
+                  color: tab===t?'#7dd3fc':'#4a8aaa', cursor:'pointer',
+                }}>
+                  {figs} → {t}
+                </button>
+              ))}
+            </div>
+
+            {/* ── PER-FIGURE DOWNLOAD ROWS ── */}
+            <div style={{display:'flex', flexDirection:'column', gap:5}}>
+              {figList.map((f,i) => (
+                <div key={i} style={{display:'flex', alignItems:'center', justifyContent:'space-between',
+                  padding:'7px 10px', borderRadius:7, background:'rgba(0,0,0,0.2)',
+                  border:'1px solid #0f3455'}}>
+                  <div>
+                    <span style={{fontSize:11, color:'#7dd3fc', fontWeight:700}}>{f.num}</span>
+                    <span style={{fontSize:10, color:'#64a7c8', marginLeft:6}}>{f.label}</span>
+                    <span style={{fontSize:9, color:'#4a6a7a', marginLeft:8}}>{f.filename}</span>
+                  </div>
+                  <DownloadBtn containerRef={f.ref} filename={f.filename} figLabel={f.label} figNum={f.num}/>
+                </div>
+              ))}
+            </div>
+
+            <div style={{marginTop:10, padding:'8px 12px', borderRadius:7,
+              background:'rgba(139,92,246,0.08)', border:'1px solid #4c1d9533', fontSize:11, color:'#94a3b8'}}>
+              💡 <b style={{color:'#c4b5fd'}}>For Fig. 1 (Study Area Map):</b> Use QGIS (free) — add OpenStreetMap base layer,
+              mark the ERA5 grid cell at 22.81°N 89.56°E, add Khulna city boundary and Sundarbans polygon.
+              Export as <code style={{color:'#7dd3fc'}}>Fig1_StudyArea_Khulna.png</code> at 300 dpi.
+            </div>
+          </div>
+
           {/* TABS */}
           <div style={{display:"flex",gap:3,background:"rgba(255,255,255,0.03)",borderRadius:12,padding:4,border:"1px solid #0f3455",marginBottom:14,flexWrap:"wrap"}}>
             {TABS.map(([v,l])=>(
@@ -799,20 +1264,60 @@ export default function KhulnaHeatStress() {
           {tab==="seasonal"&&(
             <>
               <div style={box}>
-                <div style={{fontSize:9,color:"#a78bfa",letterSpacing:3,textTransform:"uppercase",marginBottom:12}}>🌿 Seasonal WBGT Comparison</div>
-                <ResponsiveContainer width="100%" height={260}>
-                  <BarChart data={seasonalStats} margin={{top:5,right:14,left:0,bottom:5}}>
-                    <CartesianGrid stroke="#0a1a28" strokeDasharray="3 3"/>
-                    <XAxis dataKey="name" tick={{fill:"#94a3b8",fontSize:11}}/>
-                    <YAxis tick={{fill:"#4a8aaa",fontSize:9}} unit="°C" domain={[20,38]}/>
+                <div style={{fontSize:9,color:"#a78bfa",letterSpacing:3,textTransform:"uppercase",marginBottom:12}}>🌿 Seasonal WBGT — Dot Plot</div>
+                <DownloadBtn containerRef={refFig4} filename="Fig4_Seasonal_WBGT.png" figLabel="Seasonal WBGT comparison bar chart" figNum="Fig. 4"/>
+                <div ref={refFig4} style={{background:th.bg, padding: paperMode?'8px':0, borderRadius:8}}>
+                {/* Cleveland dot plot built with ComposedChart */}
+                <ResponsiveContainer width="100%" height={300}>
+                  <ComposedChart data={seasonalStats} layout="vertical"
+                    margin={{top:10,right:60,left:110,bottom:10}}>
+                    <CartesianGrid stroke={th.grid} strokeDasharray={th.gridDash} horizontal={false}/>
+                    <XAxis type="number" tick={{fill:th.axTick,fontSize:9}} unit="°C"
+                           domain={[0,40]} ticks={[0,5,10,15,20,25,30,35,40]}/>
+                    <YAxis type="category" dataKey="name" tick={{fill:th.axTick,fontSize:11}} width={105}/>
                     <Tooltip content={<CT/>}/>
-                    <ReferenceLine y={35} stroke="#ef4444" strokeDasharray="4 2" label={{value:"Extreme",fill:"#ef4444",fontSize:9}}/>
-                    <ReferenceLine y={32} stroke="#f97316" strokeDasharray="4 2" label={{value:"Danger",fill:"#f97316",fontSize:9}}/>
-                    <ReferenceLine y={28} stroke="#facc15" strokeDasharray="4 2"/>
-                    <Bar dataKey="avgWbgt" name="Avg WBGT" fill="#f97316" radius={[5,5,0,0]} unit="°C"/>
-                    <Bar dataKey="avgTw"   name="Avg Wet Bulb" fill="#38bdf8" radius={[5,5,0,0]} unit="°C"/>
-                  </BarChart>
+                    <Legend wrapperStyle={{color:th.subtext,fontSize:10}}/>
+                    <ReferenceLine x={35} stroke={th.refExtreme} strokeDasharray="4 2"
+                      label={{value:"Extreme ≥35°C",fill:th.refExtreme,fontSize:9,position:"top"}}/>
+                    <ReferenceLine x={32} stroke={th.refDanger}  strokeDasharray="4 2"
+                      label={{value:"Danger ≥32°C", fill:th.refDanger, fontSize:9,position:"top"}}/>
+                    <ReferenceLine x={28} stroke={th.refCaution} strokeDasharray="4 2"
+                      label={{value:"Caution ≥28°C",fill:th.refCaution,fontSize:9,position:"top"}}/>
+                    {/* WBGT stem */}
+                    <Bar dataKey="avgWbgt" name="Avg WBGT" fill="none"
+                         shape={(props)=>{
+                           const {x,y,width,height,value} = props;
+                           const cy2 = y + height/2;
+                           return <line x1={x} y1={cy2} x2={x+width} y2={cy2}
+                                        stroke={th.barWbgt} strokeWidth={3}/>;
+                         }} unit="°C"/>
+                    {/* Tw stem */}
+                    <Bar dataKey="avgTw" name="Avg Wet Bulb" fill="none"
+                         shape={(props)=>{
+                           const {x,y,width,height,value} = props;
+                           const cy2 = y + height/2;
+                           return <line x1={x} y1={cy2} x2={x+width} y2={cy2}
+                                        stroke={th.barTw} strokeWidth={3}/>;
+                         }} unit="°C"/>
+                    {/* WBGT dot */}
+                    <Scatter dataKey="avgWbgt" name="WBGT dot" fill={th.barWbgt}
+                             shape={(props)=>{
+                               const {cx:sx,cy:sy} = props;
+                               return <circle cx={sx} cy={sy} r={8}
+                                              fill={th.barWbgt}
+                                              stroke={paperMode?'#fff':'#111'} strokeWidth={2}/>;
+                             }} unit="°C"/>
+                    {/* Tw dot */}
+                    <Scatter dataKey="avgTw" name="Tw dot" fill={th.barTw}
+                             shape={(props)=>{
+                               const {cx:sx,cy:sy} = props;
+                               return <circle cx={sx} cy={sy} r={8}
+                                              fill={th.barTw}
+                                              stroke={paperMode?'#fff':'#111'} strokeWidth={2}/>;
+                             }} unit="°C"/>
+                  </ComposedChart>
                 </ResponsiveContainer>
+                </div>
               </div>
               <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:12,marginBottom:16}}>
                 {seasonalStats.map((s,i)=>(
@@ -886,16 +1391,19 @@ export default function KhulnaHeatStress() {
                   </div>
                   <div style={box}>
                     <div style={{fontSize:9,color:"#a78bfa",letterSpacing:3,textTransform:"uppercase",marginBottom:10}}>Annual WBGT — Actual vs OLS Trend Line</div>
+                    <DownloadBtn containerRef={refFig6} filename="Fig6_OLS_Regression.png" figLabel="OLS regression actual vs trend line" figNum="Fig. 6"/>
+                    <div ref={refFig6} style={{background:th.bg, padding: paperMode?'8px':0, borderRadius:8}}>
                     <ResponsiveContainer width="100%" height={240}>
                       <ComposedChart data={regressionStats.trendLine} margin={{top:5,right:14,left:0,bottom:5}}>
-                        <CartesianGrid stroke="#0a1a28" strokeDasharray="3 3"/>
-                        <XAxis dataKey="year" tick={{fill:"#4a8aaa",fontSize:11}}/>
-                        <YAxis tick={{fill:"#4a8aaa",fontSize:9}} unit="°C" domain={["auto","auto"]}/>
-                        <Tooltip content={<CT/>}/><Legend wrapperStyle={{color:"#94a3b8",fontSize:10}}/>
-                        <Bar dataKey="actual" name="Actual WBGT" fill="#f9731644" unit="°C"/>
-                        <Line type="linear" dataKey="predicted" name="OLS Trend" stroke="#ef4444" strokeWidth={2.5} dot={false} unit="°C" strokeDasharray="6 3"/>
+                        <CartesianGrid stroke={th.grid} strokeDasharray={th.gridDash}/>
+                        <XAxis dataKey="year" tick={{fill:th.axTick,fontSize:11}}/>
+                        <YAxis tick={{fill:th.axTick,fontSize:9}} unit="°C" domain={["auto","auto"]}/>
+                        <Tooltip content={<CT/>}/><Legend wrapperStyle={{color:th.subtext,fontSize:10}}/>
+                        <Bar dataKey="actual" name="Actual WBGT" fill={paperMode?"#fb923c44":"#f9731644"} unit="°C"/>
+                        <Line type="linear" dataKey="predicted" name="OLS Trend" stroke={th.refExtreme} strokeWidth={2.5} dot={false} unit="°C" strokeDasharray="6 3"/>
                       </ComposedChart>
                     </ResponsiveContainer>
+                    </div>
                   </div>
                   <div style={{...box,background:"rgba(56,189,248,0.04)",border:"1px solid #0c4a6e"}}>
                     <div style={{fontSize:9,color:"#38bdf8",letterSpacing:3,textTransform:"uppercase",marginBottom:10}}>📝 Ready-to-Paste Regression Text</div>
@@ -935,17 +1443,20 @@ export default function KhulnaHeatStress() {
               </div>
               <div style={box}>
                 <div style={{fontSize:9,color:"#a78bfa",letterSpacing:3,textTransform:"uppercase",marginBottom:10}}>Exceedance Days Per Year</div>
+                <DownloadBtn containerRef={refFig5} filename="Fig5_Exceedance_Frequency.png" figLabel="Exceedance frequency bar chart" figNum="Fig. 5"/>
+                <div ref={refFig5} style={{background:th.bg, padding: paperMode?'8px':0, borderRadius:8}}>
                 <ResponsiveContainer width="100%" height={230}>
                   <BarChart data={exceedance.byYear} margin={{top:5,right:14,left:0,bottom:5}}>
-                    <CartesianGrid stroke="#0a1a28" strokeDasharray="3 3"/>
-                    <XAxis dataKey="year" tick={{fill:"#4a8aaa",fontSize:10}} interval={iv(exceedance.byYear.length)}/>
-                    <YAxis tick={{fill:"#4a8aaa",fontSize:9}} unit=" d"/>
-                    <Tooltip content={<CT/>}/><Legend wrapperStyle={{color:"#94a3b8",fontSize:10}}/>
-                    <Bar dataKey="Tw ≥ 28°C" name="Tw ≥ 28°C" fill="#fb923c" radius={[4,4,0,0]} unit=" days"/>
-                    <Bar dataKey="Tw ≥ 32°C" name="Tw ≥ 32°C" fill="#ef4444" radius={[4,4,0,0]} unit=" days"/>
-                    <Bar dataKey="WBGT ≥ 32°C" name="WBGT ≥ 32°C" fill="#dc2626" radius={[4,4,0,0]} unit=" days"/>
+                    <CartesianGrid stroke={th.grid} strokeDasharray={th.gridDash}/>
+                    <XAxis dataKey="year" tick={{fill:th.axTick,fontSize:10}} interval={iv(exceedance.byYear.length)}/>
+                    <YAxis tick={{fill:th.axTick,fontSize:9}} unit=" d"/>
+                    <Tooltip content={<CT/>}/><Legend wrapperStyle={{color:th.subtext,fontSize:10}}/>
+                    <Bar dataKey="Tw ≥ 28°C"   name="Tw ≥ 28°C"   fill="#fb923c" radius={[4,4,0,0]} unit=" days"/>
+                    <Bar dataKey="Tw ≥ 32°C"   name="Tw ≥ 32°C"   fill={th.refDanger}  radius={[4,4,0,0]} unit=" days"/>
+                    <Bar dataKey="WBGT ≥ 32°C" name="WBGT ≥ 32°C" fill={th.refExtreme} radius={[4,4,0,0]} unit=" days"/>
                   </BarChart>
                 </ResponsiveContainer>
+                </div>
               </div>
               <div style={{...box,background:"rgba(56,189,248,0.04)",border:"1px solid #0c4a6e"}}>
                 <div style={{fontSize:9,color:"#38bdf8",letterSpacing:3,textTransform:"uppercase",marginBottom:10}}>📝 Ready-to-Paste Exceedance Text</div>
@@ -971,6 +1482,7 @@ export default function KhulnaHeatStress() {
                 <div style={{fontSize:9,color:"#ef4444",letterSpacing:3,textTransform:"uppercase"}}>Heat Stroke Risk Index (WBGT)</div>
                 <div style={{fontSize:14,fontWeight:700,color:"#e0f4ff",marginTop:2}}>{view==="monthly"?"Monthly Average WBGT + Danger Days":"Daily WBGT Values"}</div>
               </div>
+              <DownloadBtn containerRef={refFig7} filename="Fig7_Monthly_WBGT_Risk.png" figLabel="Monthly WBGT heat stroke risk" figNum="Fig. 7"/>
               <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:12}}>
                 {[["< 28°C","Safe","#4ade80"],["28–32°C","Caution","#facc15"],["32–35°C","Danger","#f97316"],["≥ 35°C","Extreme","#ef4444"]].map(([r,l,c],i)=>(
                   <div key={i} style={{display:"flex",alignItems:"center",gap:5,background:"rgba(255,255,255,0.03)",border:`1px solid ${c}33`,borderRadius:7,padding:"4px 10px"}}>
@@ -978,34 +1490,39 @@ export default function KhulnaHeatStress() {
                   </div>
                 ))}
               </div>
+              <div ref={refFig7} style={{background:th.bg, padding: paperMode?'8px':0, borderRadius:8}}>
               <ResponsiveContainer width="100%" height={290}>
                 {view==="monthly"?(
                   <ComposedChart data={monthlyData} margin={{top:5,right:14,left:0,bottom:5}}>
-                    <CartesianGrid stroke="#0a1a28" strokeDasharray="3 3"/>
-                    <XAxis dataKey="label" tick={{fill:"#4a8aaa",fontSize:9}} interval={iv(monthlyData.length)}/>
-                    <YAxis yAxisId="l" tick={{fill:"#4a8aaa",fontSize:9}} unit="°C" domain={[20,40]}/>
-                    <YAxis yAxisId="r" orientation="right" tick={{fill:"#4a8aaa",fontSize:9}} unit=" d"/>
-                    <Tooltip content={<CT/>}/><Legend wrapperStyle={{color:"#94a3b8",fontSize:10}}/>
-                    <ReferenceLine yAxisId="l" y={35} stroke="#ef4444" strokeDasharray="4 2" label={{value:"Extreme",fill:"#ef4444",fontSize:9,position:"insideTopLeft"}}/>
-                    <ReferenceLine yAxisId="l" y={32} stroke="#f97316" strokeDasharray="4 2" label={{value:"Danger",fill:"#f97316",fontSize:9,position:"insideTopLeft"}}/>
-                    <ReferenceLine yAxisId="l" y={28} stroke="#facc15" strokeDasharray="4 2"/>
-                    <Area yAxisId="l" type="monotone" dataKey="wbgt" name="Avg WBGT" stroke="#f97316" fill="#f9731622" strokeWidth={2} dot={false} unit="°C"/>
-                    <Bar  yAxisId="r" dataKey="dangerDays" name="Danger Days" fill="#ef444444" radius={[3,3,0,0]} unit=" days"/>
+                    <CartesianGrid stroke={th.grid} strokeDasharray={th.gridDash}/>
+                    <XAxis dataKey="label" tick={{fill:th.axTick,fontSize:9}} interval={iv(monthlyData.length)}/>
+                    <YAxis yAxisId="l" tick={{fill:th.axTick,fontSize:9}} unit="°C" domain={[20,40]}/>
+                    <YAxis yAxisId="r" orientation="right" tick={{fill:th.axTick,fontSize:9}} unit=" d"/>
+                    <Tooltip content={<CT/>}/><Legend wrapperStyle={{color:th.subtext,fontSize:10}}/>
+                    <ReferenceLine yAxisId="l" y={35} stroke={th.refExtreme} strokeDasharray="4 2" label={{value:"Extreme ≥35°C",fill:th.refExtreme,fontSize:9,position:"insideTopLeft"}}/>
+                    <ReferenceLine yAxisId="l" y={32} stroke={th.refDanger}  strokeDasharray="4 2" label={{value:"Danger ≥32°C", fill:th.refDanger, fontSize:9,position:"insideTopLeft"}}/>
+                    <ReferenceLine yAxisId="l" y={28} stroke={th.refCaution} strokeDasharray="4 2"/>
+                    <Area yAxisId="l" type="monotone" dataKey="wbgt" name="Avg WBGT" stroke={th.lineWbgt} fill={th.areaFill} strokeWidth={2} dot={false} unit="°C"/>
+                    <Bar  yAxisId="r" dataKey="dangerDays" name="Danger Days" fill={paperMode?"#c2410c44":"#ef444444"} radius={[3,3,0,0]} unit=" days"/>
                   </ComposedChart>
                 ):(
                   <AreaChart data={chartData} margin={{top:5,right:14,left:0,bottom:5}}>
-                    <defs><linearGradient id="gW" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#f97316" stopOpacity={0.35}/><stop offset="95%" stopColor="#f97316" stopOpacity={0}/></linearGradient></defs>
-                    <CartesianGrid stroke="#0a1a28" strokeDasharray="3 3"/>
-                    <XAxis dataKey="label" tick={{fill:"#4a8aaa",fontSize:9}} interval={iv(filteredRows.length)}/>
-                    <YAxis tick={{fill:"#4a8aaa",fontSize:9}} unit="°C" domain={[18,42]}/>
+                    <defs><linearGradient id="gW" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%"  stopColor={th.areaWbgt} stopOpacity={0.35}/>
+                      <stop offset="95%" stopColor={th.areaWbgt} stopOpacity={0}/>
+                    </linearGradient></defs>
+                    <CartesianGrid stroke={th.grid} strokeDasharray={th.gridDash}/>
+                    <XAxis dataKey="label" tick={{fill:th.axTick,fontSize:9}} interval={iv(filteredRows.length)}/>
+                    <YAxis tick={{fill:th.axTick,fontSize:9}} unit="°C" domain={[18,42]}/>
                     <Tooltip content={<CT/>}/>
-                    <ReferenceLine y={35} stroke="#ef4444" strokeDasharray="4 2"/>
-                    <ReferenceLine y={32} stroke="#f97316" strokeDasharray="4 2"/>
-                    <ReferenceLine y={28} stroke="#facc15" strokeDasharray="4 2"/>
-                    <Area type="monotone" dataKey="wbgt" name="WBGT" stroke="#f97316" fill="url(#gW)" strokeWidth={1.5} dot={false} unit="°C"/>
+                    <ReferenceLine y={35} stroke={th.refExtreme} strokeDasharray="4 2"/>
+                    <ReferenceLine y={32} stroke={th.refDanger}  strokeDasharray="4 2"/>
+                    <ReferenceLine y={28} stroke={th.refCaution} strokeDasharray="4 2"/>
+                    <Area type="monotone" dataKey="wbgt" name="WBGT" stroke={th.lineWbgt} fill="url(#gW)" strokeWidth={1.5} dot={false} unit="°C"/>
                   </AreaChart>
                 )}
               </ResponsiveContainer>
+              </div>
             </div>
           )}
 
@@ -1016,19 +1533,25 @@ export default function KhulnaHeatStress() {
                 <div style={{fontSize:9,color:"#38bdf8",letterSpacing:3,textTransform:"uppercase"}}>Wet Bulb Temperature (Tw) · Stull (2011)</div>
                 <div style={{fontSize:14,fontWeight:700,color:"#e0f4ff",marginTop:2}}>{view==="monthly"?"Monthly Average Tw":"Daily Tw"} — Survival limit = 35°C</div>
               </div>
+              <DownloadBtn containerRef={refFig8} filename="Fig8_Wet_Bulb_Temperature.png" figLabel="Wet bulb temperature time series" figNum="Fig. 8"/>
+              <div ref={refFig8} style={{background:th.bg, padding: paperMode?'8px':0, borderRadius:8}}>
               <ResponsiveContainer width="100%" height={270}>
                 <AreaChart data={chartData} margin={{top:5,right:14,left:0,bottom:5}}>
-                  <defs><linearGradient id="gT" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#38bdf8" stopOpacity={0.35}/><stop offset="95%" stopColor="#38bdf8" stopOpacity={0}/></linearGradient></defs>
-                  <CartesianGrid stroke="#0a1a28" strokeDasharray="3 3"/>
-                  <XAxis dataKey="label" tick={{fill:"#4a8aaa",fontSize:9}} interval={iv(chartData.length)}/>
-                  <YAxis tick={{fill:"#4a8aaa",fontSize:9}} unit="°C" domain={[10,38]}/>
+                  <defs><linearGradient id="gT" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%"  stopColor={th.lineTw} stopOpacity={0.35}/>
+                    <stop offset="95%" stopColor={th.lineTw} stopOpacity={0}/>
+                  </linearGradient></defs>
+                  <CartesianGrid stroke={th.grid} strokeDasharray={th.gridDash}/>
+                  <XAxis dataKey="label" tick={{fill:th.axTick,fontSize:9}} interval={iv(chartData.length)}/>
+                  <YAxis tick={{fill:th.axTick,fontSize:9}} unit="°C" domain={[10,38]}/>
                   <Tooltip content={<CT/>}/>
-                  <ReferenceLine y={35} stroke="#ef4444" strokeWidth={2} strokeDasharray="5 3" label={{value:"☠ Lethal 35°C — Raymond et al. 2020",fill:"#ef4444",fontSize:9,position:"insideTopLeft"}}/>
-                  <ReferenceLine y={32} stroke="#f97316" strokeDasharray="4 2"/>
-                  <ReferenceLine y={28} stroke="#facc15" strokeDasharray="4 2"/>
-                  <Area type="monotone" dataKey="wetBulb" name="Wet Bulb Temp" stroke="#38bdf8" fill="url(#gT)" strokeWidth={2} dot={false} unit="°C"/>
+                  <ReferenceLine y={35} stroke={th.refLethal} strokeWidth={2} strokeDasharray="5 3" label={{value:"☠ Lethal 35°C — Raymond et al. 2020",fill:th.refLethal,fontSize:9,position:"insideTopLeft"}}/>
+                  <ReferenceLine y={32} stroke={th.refDanger}  strokeDasharray="4 2"/>
+                  <ReferenceLine y={28} stroke={th.refCaution} strokeDasharray="4 2"/>
+                  <Area type="monotone" dataKey="wetBulb" name="Wet Bulb Temp" stroke={th.lineTw} fill="url(#gT)" strokeWidth={2} dot={false} unit="°C"/>
                 </AreaChart>
               </ResponsiveContainer>
+              </div>
             </div>
           )}
 
@@ -1036,33 +1559,56 @@ export default function KhulnaHeatStress() {
           {tab==="trend"&&(
             <>
               <div style={box}>
-                <div style={{fontSize:9,color:"#a78bfa",letterSpacing:3,textTransform:"uppercase",marginBottom:10}}>Risk Days Per Year — Stacked</div>
+                <div style={{fontSize:9,color:"#a78bfa",letterSpacing:3,textTransform:"uppercase",marginBottom:10}}>Risk Days Per Year — Stacked Area</div>
+                <DownloadBtn containerRef={refFig3} filename="Fig3_Annual_Danger_Days.png" figLabel="Annual stacked heat stress risk days" figNum="Fig. 3"/>
+                <div ref={refFig3} style={{background:th.bg, padding: paperMode?'8px':0, borderRadius:8}}>
                 <ResponsiveContainer width="100%" height={260}>
-                  <BarChart data={yearlyData} margin={{top:5,right:14,left:0,bottom:5}}>
-                    <CartesianGrid stroke="#0a1a28" strokeDasharray="3 3"/>
-                    <XAxis dataKey="year" tick={{fill:"#4a8aaa",fontSize:11}} interval={iv(yearlyData.length)}/>
-                    <YAxis tick={{fill:"#4a8aaa",fontSize:9}} unit=" d"/>
-                    <Tooltip content={<CT/>}/><Legend wrapperStyle={{color:"#94a3b8",fontSize:10}}/>
-                    <Bar dataKey="cautionDays" name="Caution 28–32°C" stackId="a" fill="#facc15" unit=" days"/>
-                    <Bar dataKey="dangerDays"  name="Danger 32–35°C"  stackId="a" fill="#f97316" unit=" days"/>
-                    <Bar dataKey="extremeDays" name="Extreme ≥35°C"   stackId="a" fill="#ef4444" radius={[4,4,0,0]} unit=" days"/>
-                  </BarChart>
+                  <AreaChart data={yearlyData} margin={{top:10,right:14,left:0,bottom:5}}>
+                    <defs>
+                      <linearGradient id="gCau" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%"  stopColor={th.caution} stopOpacity={0.85}/>
+                        <stop offset="95%" stopColor={th.caution} stopOpacity={0.55}/>
+                      </linearGradient>
+                      <linearGradient id="gDan" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%"  stopColor={th.danger}  stopOpacity={0.90}/>
+                        <stop offset="95%" stopColor={th.danger}  stopOpacity={0.60}/>
+                      </linearGradient>
+                      <linearGradient id="gExt" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%"  stopColor={th.extreme} stopOpacity={0.95}/>
+                        <stop offset="95%" stopColor={th.extreme} stopOpacity={0.65}/>
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid stroke={th.grid} strokeDasharray={th.gridDash}/>
+                    <XAxis dataKey="year" tick={{fill:th.axTick,fontSize:11}} interval={iv(yearlyData.length)}/>
+                    <YAxis tick={{fill:th.axTick,fontSize:9}} unit=" d"/>
+                    <Tooltip content={<CT/>}/><Legend wrapperStyle={{color:th.subtext,fontSize:10}}/>
+                    <Area type="monotone" dataKey="cautionDays" name="Caution 28–32°C" stackId="a"
+                          stroke={th.caution} fill="url(#gCau)" strokeWidth={1.2} unit=" days"/>
+                    <Area type="monotone" dataKey="dangerDays"  name="Danger 32–35°C"  stackId="a"
+                          stroke={th.danger}  fill="url(#gDan)" strokeWidth={1.2} unit=" days"/>
+                    <Area type="monotone" dataKey="extremeDays" name="Extreme ≥35°C"   stackId="a"
+                          stroke={th.extreme} fill="url(#gExt)" strokeWidth={1.5} unit=" days"/>
+                  </AreaChart>
                 </ResponsiveContainer>
+                </div>
               </div>
               <div style={box}>
                 <div style={{fontSize:9,color:"#a78bfa",letterSpacing:3,textTransform:"uppercase",marginBottom:10}}>Annual Avg Tw & WBGT</div>
+                <DownloadBtn containerRef={refFig2} filename="Fig2_Annual_Trend_Lines.png" figLabel="Annual Tw, WBGT & Air Temp trend lines" figNum="Fig. 2"/>
+                <div ref={refFig2} style={{background:th.bg, padding: paperMode?'8px':0, borderRadius:8}}>
                 <ResponsiveContainer width="100%" height={210}>
                   <LineChart data={yearlyData} margin={{top:5,right:14,left:0,bottom:5}}>
-                    <CartesianGrid stroke="#0a1a28" strokeDasharray="3 3"/>
-                    <XAxis dataKey="year" tick={{fill:"#4a8aaa",fontSize:11}} interval={iv(yearlyData.length)}/>
-                    <YAxis tick={{fill:"#4a8aaa",fontSize:9}} unit="°C" domain={["auto","auto"]}/>
-                    <Tooltip content={<CT/>}/><Legend wrapperStyle={{color:"#94a3b8",fontSize:10}}/>
-                    <ReferenceLine y={35} stroke="#ef4444" strokeDasharray="4 2" label={{value:"Lethal 35°C",fill:"#ef4444",fontSize:9}}/>
-                    <Line type="monotone" dataKey="avgTw"   name="Avg Wet Bulb" stroke="#38bdf8" strokeWidth={2.5} dot={{fill:"#38bdf8",r:3}} unit="°C"/>
-                    <Line type="monotone" dataKey="avgWbgt" name="Avg WBGT"     stroke="#f97316" strokeWidth={2}   dot={{fill:"#f97316",r:3}} unit="°C" strokeDasharray="5 3"/>
-                    <Line type="monotone" dataKey="avgTemp" name="Avg Air Temp" stroke="#facc15" strokeWidth={1.5} dot={{fill:"#facc15",r:3}} unit="°C" strokeDasharray="3 2"/>
+                    <CartesianGrid stroke={th.grid} strokeDasharray={th.gridDash}/>
+                    <XAxis dataKey="year" tick={{fill:th.axTick,fontSize:11}} interval={iv(yearlyData.length)}/>
+                    <YAxis tick={{fill:th.axTick,fontSize:9}} unit="°C" domain={["auto","auto"]}/>
+                    <Tooltip content={<CT/>}/><Legend wrapperStyle={{color:th.subtext,fontSize:10}}/>
+                    <ReferenceLine y={35} stroke={th.refLethal} strokeDasharray="4 2" label={{value:"Lethal 35°C",fill:th.refLethal,fontSize:9}}/>
+                    <Line type="monotone" dataKey="avgTw"   name="Avg Wet Bulb" stroke={th.lineTw}   strokeWidth={2.5} dot={{fill:th.lineTw,r:3}} unit="°C"/>
+                    <Line type="monotone" dataKey="avgWbgt" name="Avg WBGT"     stroke={th.lineWbgt} strokeWidth={2}   dot={{fill:th.lineWbgt,r:3}} unit="°C" strokeDasharray="5 3"/>
+                    <Line type="monotone" dataKey="avgTemp" name="Avg Air Temp" stroke={th.lineTemp} strokeWidth={1.5} dot={{fill:th.lineTemp,r:3}} unit="°C" strokeDasharray="3 2"/>
                   </LineChart>
                 </ResponsiveContainer>
+                </div>
               </div>
             </>
           )}
