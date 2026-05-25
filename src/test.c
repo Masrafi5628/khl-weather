@@ -1,33 +1,27 @@
 #include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
-#include <math.h>
+void swap(int *x,int *y){
+    int t=*x;
+    *x=*y;
+    *y=t;
+}
 
-int main()
-{
-    char name1[100],name2[100],remark[50];
-    gets(name1);
-    gets(name2);
-    gets(remark);
-    printf("Length1 - %d, Length2 - %d", strlen(name1),strlen(name2));
-    if(strcmp(name1,name2)==0){
-        printf("Exact Match\n");
+void bubble_sort(int arr[], int n){
+    for(int i=0;i<n;i++){
+        for(int j=0;j<n-i-1;j++){
+            if(arr[j]>arr[j+1]) 
+                swap(&arr[j],&arr[j+1]);
+        }
     }
-    else {
-        printf("Do not match\n");
-    }
-    char name3[]="Ovi";
+}
 
-    strcpy(name1,name3);
-    strcat(name1," ");
-    strcat(name1,name2);
-    strcat(name1," - ");
-    puts(name1);
-    strcat(name1,remark);
-
-    puts(name1);
-
-
-
+int main(){
+    int n;
+    scanf("%d",&n);
+    int arr[n];
+    for(int i=0;i<n;i++) scanf("%d",&arr[i]);
+    bubble_sort(arr,n);
+    
+    for(int i=0;i<n;i++) printf("%d ",arr[i]);
+    printf("\n");
     return 0;
 }
