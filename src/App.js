@@ -1058,13 +1058,15 @@ export default function App(){
                       tick={{...atick,fontSize:FS.tick}} width={110}/>
                     <Tooltip content={<Tip/>}/>
                     <Bar dataKey="n" name="Days" radius={[0,5,5,0]} unit=" days"
-                      label={({x,y,width,height,value,index})=>(
-                        <text x={x+width+10} y={y+height/2}
-                          fill={tc.ax} fontSize={FS.tick} fontWeight={600}
-                          textAnchor="start" dominantBaseline="middle">
-                          {value?.toLocaleString()} ({exceed[index]?.pct}%)
-                        </text>
-                      )}>
+                      label={({x,y,width,height,value})=>
+                        value?(
+                          <text x={x+width+10} y={y+height/2}
+                            fill={tc.ax} fontSize={FS.tick} fontWeight={600}
+                            textAnchor="start" dominantBaseline="middle">
+                            {value.toLocaleString()} ({data.length?+(value/data.length*100).toFixed(1):0}%)
+                          </text>
+                        ):null
+                      }>
                       {exceed.map((e,i)=><Cell key={i} fill={e.color}/>)}
                     </Bar>
                   </BarChart>
@@ -1083,11 +1085,11 @@ export default function App(){
               <div ref={r6} style={chartBg}>
                 <ResponsiveContainer width="100%" height={340}>
                   <ComposedChart data={reg.chart}
-                    margin={{top:8,right:24,left:8,bottom:36}}>
+                    margin={{top:8,right:24,left:20,bottom:36}}>
                     <CartesianGrid stroke={tc.grid} strokeDasharray="3 3"/>
                     <XAxis dataKey="year" tick={atick} interval={2}
                       label={xLab('Year')}/>
-                    <YAxis tick={atick} unit="°C" domain={reg.domain}
+                    <YAxis tick={atick} unit="°C" domain={reg.domain} width={80}
                       label={yLab('Annual mean WBGT (°C)')}/>
                     <Tooltip content={<Tip/>}/>
                     <Legend wrapperStyle={legStyle} iconSize={12}
