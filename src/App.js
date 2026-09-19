@@ -112,17 +112,20 @@ function byYear(rows){
   const y={};
   rows.forEach(r=>{
     const yr=r.date.slice(0,4);
-    if(!y[yr])y[yr]={tw:[],wbgt:[],t:[],rh:[],c:0,d:0,e:0};
+    if(!y[yr])y[yr]={tw:[],wbgt:[],t:[],tmax:[],tmin:[],rh:[],c:0,d:0,e:0};
     if(r.tw!=null)y[yr].tw.push(r.tw);
     if(r.wbgt!=null)y[yr].wbgt.push(r.wbgt);
     if(r.t!=null)y[yr].t.push(r.t);
+    if(r.tmax!=null)y[yr].tmax.push(r.tmax);
+    if(r.tmin!=null)y[yr].tmin.push(r.tmin);
     if(r.rh!=null)y[yr].rh.push(r.rh);
     if(r.wbgt>=28&&r.wbgt<32)y[yr].c++;
     if(r.wbgt>=32&&r.wbgt<35)y[yr].d++;
     if(r.wbgt>=35)y[yr].e++;
   });
   return Object.entries(y).sort().map(([yr,v])=>({
-    year:yr,yn:+yr,tw:avg(v.tw),wbgt:avg(v.wbgt),t:avg(v.t),rh:avg(v.rh),
+    year:yr,yn:+yr,tw:avg(v.tw),wbgt:avg(v.wbgt),t:avg(v.t),
+    tmax:avg(v.tmax),tmin:avg(v.tmin),rh:avg(v.rh),
     c:v.c,d:v.d,e:v.e,
   }));
 }
@@ -509,12 +512,15 @@ export default function App(){
 
   const mk=useMemo(()=>{
     if(yearly.length<4) return null;
-    const tw=yearly.map(y=>y.tw).filter(Boolean);
-    const wbgt=yearly.map(y=>y.wbgt).filter(Boolean);
-    const t=yearly.map(y=>y.t).filter(Boolean);
+    const series=key=>yearly.map(y=>y[key]).filter(v=>v!=null);
+    const tw=series('tw');
+    const wbgt=series('wbgt');
+    const t=series('t');
+    const tmax=series('tmax');
+    const tmin=series('tmin');
     const d=yearly.map(y=>y.d);
     const run=arr=>({std:mannKendall(arr),mod:modifiedMannKendall(arr),slope:senSlope(arr)});
-    return{tw:run(tw),wbgt:run(wbgt),t:run(t),danger:run(d)};
+    return{tw:run(tw),wbgt:run(wbgt),t:run(t),tmax:run(tmax),tmin:run(tmin),danger:run(d)};
   },[yearly]);
 
   const reg=useMemo(()=>{
@@ -590,8 +596,8 @@ export default function App(){
         ...data.map(r=>[r.date,r.tmax,r.tmin,r.t,r.rh,r.tw,r.wbgt])
       ]),'Daily');
       XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([
-        ['Year','Avg_Tw','Avg_WBGT','Avg_T','Avg_RH','Caution','Danger','Extreme'],
-        ...yearly.map(y=>[y.year,y.tw,y.wbgt,y.t,y.rh,y.c,y.d,y.e])
+        ['Year','Avg_Tw','Avg_WBGT','Avg_T','Avg_Tmax','Avg_Tmin','Avg_RH','Caution','Danger','Extreme'],
+        ...yearly.map(y=>[y.year,y.tw,y.wbgt,y.t,y.tmax,y.tmin,y.rh,y.c,y.d,y.e])
       ]),'Yearly');
       XLSX.writeFile(wb,`Khulna_HeatStress_${startDate}_${endDate}.xlsx`);
     }catch(e){alert(e.message);}
@@ -845,12 +851,15 @@ export default function App(){
                     </thead>
                     <tbody>
                       {[
-                        ['Tw (°C)',          mk.tw,    C.tw,   `+${mk.tw.slope}°C/yr`    ],
-                        ['WBGT indoor (°C)', mk.wbgt,  C.wbgt, `+${mk.wbgt.slope}°C/yr`  ],
-                        ['Air Temp (°C)',    mk.t,     C.temp, `+${mk.t.slope}°C/yr`      ],
-                        ['Danger days',      mk.danger,C.danger,`+${mk.danger.slope} d/yr`],
+                        ['Tw (°C)',          mk.tw,    C.tw,    '°C/yr'],
+                        ['WBGT indoor (°C)', mk.wbgt,  C.wbgt,  '°C/yr'],
+                        ['Air Temp (°C)',    mk.t,     C.temp,  '°C/yr'],
+                        ['Tmax (°C)',        mk.tmax,  C.extreme,'°C/yr'],
+                        ['Tmin (°C)',        mk.tmin,  C.accent, '°C/yr'],
+                        ['Danger days',      mk.danger,C.danger,'d/yr'],
                       ].map(([name,m,col,slope],i)=>{
                         const both=m.std?.p<0.05&&m.mod?.p<0.05;
+                        const slopeText=`${m.slope>0?'+':''}${m.slope} ${slope}`;
                         return(
                           <tr key={i} style={{borderBottom:`1px solid ${C.grid}`,
                             background:i%2?'rgba(255,255,255,0.015)':'transparent'}}>
@@ -861,7 +870,7 @@ export default function App(){
                             <td style={{padding:'7px 10px',color:C.sub}}>{m.mod?.Z}</td>
                             <td style={{padding:'7px 10px'}}><span style={{color:sigColor(m.mod?.p),fontWeight:700}}>{sigLabel(m.mod?.p)}</span></td>
                             <td style={{padding:'7px 10px',color:'#a78bfa'}}>{m.mod?.nsRatio}</td>
-                            <td style={{padding:'7px 10px',color:C.danger,fontWeight:700}}>{slope}</td>
+                            <td style={{padding:'7px 10px',color:C.danger,fontWeight:700}}>{slopeText}</td>
                             <td style={{padding:'7px 10px',fontSize:10,fontStyle:'italic',
                               color:both?'#34d399':m.mod?.p<0.1?'#fbbf24':'#f87171'}}>
                               {both?'Robust (both)':m.mod?.p<0.1?'Marginal':'Weakened'}

@@ -1,0 +1,55 @@
+cff-version: 1.2.0
+message: "If you use this software or the associated analysis, please cite the software and the associated research article."
+type: software
+
+title: "KHL Weather Analysis"
+version: "1.0.0"
+date-released: "2026-09-19"
+
+authors:
+  - family-names: "Seraj Sakib"
+    given-names: "Md. Masrafi Bin"
+    affiliation: "Bangladesh Army University of Science and Technology (BAUST), Khulna, Bangladesh"
+  - family-names: "Khandaker"
+    given-names: "Nadim Reza"
+    affiliation: "North South University"
+
+abstract: >
+  Analysis software and reproducibility resources for investigating
+  long-term trends in physiological heat stress and associated health
+  risks in Khulna, Bangladesh, using ERA5 reanalysis and NOAA GSOD
+  observational data for the period 2000–2025.
+
+keywords:
+  - "heat stress"
+  - "wet-bulb temperature"
+  - "WBGT"
+  - "ERA5"
+  - "Mann-Kendall"
+  - "Sen's slope"
+  - "Khulna"
+  - "Bangladesh"
+  - "climate change"
+  - "health risk"
+
+repository-code: "https://github.com/Masrafi5628/khl-weather"
+
+license: "PolyForm-Noncommercial-1.0.0"
+license-url: "https://polyformproject.org/licenses/noncommercial/1.0.0"
+
+repository-artifact: "https://zenodo.org/"
+
+contact:
+  - family-names: "Seraj"
+    given-names: "Masrafi Bin"
+    affiliation: "Bangladesh Army University of Science and Technology (BAUST), Khulna, Bangladesh"
+
+preferred-citation:
+  type: article
+  title: "Long-Term Trends in Physiological Heat Stress and Associated Health Risks in Khulna, Bangladesh: A Mann-Kendall Analysis Using ERA5 Reanalysis Data (2000–2025)"
+  authors:
+    - family-names: "Seraj Sakib"
+      given-names: "Md. Masrafi Bin"
+    - family-names: "Khandaker"
+      given-names: "Nadim Reza"
+      affiliation: "North South University"
