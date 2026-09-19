@@ -1,15 +1,24 @@
 cff-version: 1.2.0
+
 message: "If you use this software or the associated analysis, please cite the software and the associated research article."
+
 type: software
 
 title: "KHL Weather Analysis"
-version: "1.0.0"
+
+version: "1.0.1"
+
 date-released: "2026-09-19"
+
+doi: "10.5281/zenodo.22841702"
+
+url: "https://doi.org/10.5281/zenodo.22841702"
 
 authors:
   - family-names: "Seraj Sakib"
     given-names: "Md. Masrafi Bin"
     affiliation: "Bangladesh Army University of Science and Technology (BAUST), Khulna, Bangladesh"
+
   - family-names: "Khandaker"
     given-names: "Nadim Reza"
     affiliation: "North South University"
@@ -35,13 +44,12 @@ keywords:
 repository-code: "https://github.com/Masrafi5628/khl-weather"
 
 license: "PolyForm-Noncommercial-1.0.0"
+
 license-url: "https://polyformproject.org/licenses/noncommercial/1.0.0"
 
-repository-artifact: "https://zenodo.org/"
-
 contact:
-  - family-names: "Seraj"
-    given-names: "Masrafi Bin"
+  - family-names: "Seraj Sakib"
+    given-names: "Md. Masrafi Bin"
     affiliation: "Bangladesh Army University of Science and Technology (BAUST), Khulna, Bangladesh"
 
 preferred-citation:
