@@ -6,13 +6,10 @@ type: software
 
 title: "KHL Weather Analysis"
 
-version: "1.0.1"
-
-date-released: "2026-09-19"
-
-doi: "10.5281/zenodo.22841702"
-
-url: "https://doi.org/10.5281/zenodo.22841702"
+version: "1.0.2"
+date-released: "2026-09-22"
+doi: "10.5281/zenodo.22890923"
+url: "https://doi.org/10.5281/zenodo.22890923"
 
 authors:
   - family-names: "Seraj Sakib"
